@@ -6,6 +6,7 @@ import sys
 from optparse import OptionParser
 import pysam
 import time
+from multiprocessing import Pool
 
 # try load C extensions
 try:
@@ -23,51 +24,49 @@ def parse_command():
                       help="Phred Q", type="int", default="20")
     parser.add_option("-o", "--output", dest="output",
                       default="/haplox/users/fastq", help="output file")
+    parser.add_option("-p", "--process", dest="process",
+                      help="number of worker processes to start", type="int", default="0")
     return parser.parse_args()
 
 
-def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phredQ=20):
+def str_compare(forward1, forward2, reverse1, reverse2, phredQ=20):
     # I believe this is the right comparing. but keep the same output with origin version first.
     # if C_EXT: return c_ext.str_compare(
-    #     len(forward_list1[2]), forward_list1[2], forward_list1[3].tolist(),
-    #     len(forward_list2[2]), forward_list2[2], forward_list2[3].tolist(),
+    #     len(forward1[2]), forward1[2], forward1[3].tolist(),
+    #     len(forward2[2]), forward2[2], forward2[3].tolist(),
     #     phredQ) and c_ext.str_compare(
-    #     len(reverse_list1[1]), reverse_list1[1], reverse_list1[2].tolist(),
-    #     len(reverse_list2[1]), reverse_list2[1], reverse_list2[2].tolist(),
+    #     len(reverse1[1]), reverse1[1], reverse1[2].tolist(),
+    #     len(reverse2[1]), reverse2[1], reverse2[2].tolist(),
     #     phredQ)
 
-    seq_1 = forward_list1[2] + reverse_list1[1]
-    phred_1 = forward_list1[3].tolist()
-    tmp_2 = reverse_list1[2].tolist()
-    phred_1.extend(tmp_2)
-    seq_2 = forward_list2[2] + reverse_list2[1]
-    phred_2 = forward_list2[3].tolist()
-    tmp_2 = reverse_list2[2].tolist()
-    phred_2.extend(tmp_2)
+    seq1   = forward1[2] + reverse1[1]
+    phred1 = forward1[3].tolist() + reverse1[2].tolist()
+    seq2   = forward2[2] + reverse2[1]
+    phred2 = forward2[3].tolist() + reverse2[2].tolist()
 
     if C_EXT: return c_ext.str_compare(
-        len(seq_1), seq_1, phred_1,
-        len(seq_2), seq_2, phred_2,
+        len(seq1), seq1, phred1,
+        len(seq2), seq2, phred2,
         phredQ)
 
-    if len(seq_1) == len(seq_2):
-        if seq_1 == seq_2:
+    if len(seq1) == len(seq2):
+        if seq1 == seq2:
             return True
         else:
             index = [0]
             count = 0
-            for i in range(len(seq_1)):
-                if phred_1[i] < phredQ or phred_2[i] < phredQ:
+            for i in range(len(seq1)):
+                if phred1[i] < phredQ or phred2[i] < phredQ:
                     if i == 0:
-                        if seq_1[i] != seq_2[i]:
+                        if seq1[i] != seq2[i]:
                             return False
                     else:
                         index.append(i)
                         count += 1
-                        if seq_1[(index[count - 1] + 1):index[count]] != seq_2[(index[count - 1] + 1):index[count]]:
+                        if seq1[(index[count - 1] + 1):index[count]] != seq2[(index[count - 1] + 1):index[count]]:
                             return False
                 else:
-                    if seq_1[i] == seq_2[i]:
+                    if seq1[i] == seq2[i]:
                         continue
                     else:
                         return False
@@ -76,90 +75,76 @@ def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phre
         return False
 
 
-def block_compare(forward_block_dict_list, reverse_block_dict, phredQ=20):
+def block_compare(forward_block, reverse_block, phredQ=20):
     dup = set()
     keep = [] # list of id of reads to keep
-    for i in range(len(forward_block_dict_list)):
-        if forward_block_dict_list[i][1] not in dup:
-            keep.append(forward_block_dict_list[i][0])
-            if forward_block_dict_list[i][1] not in reverse_block_dict:
+    for i in range(len(forward_block)):
+        if forward_block[i][1] not in dup:
+            keep.append(forward_block[i][0])
+            if forward_block[i][1] not in reverse_block:
                 continue
-        for j in range((i + 1), len(forward_block_dict_list)):
-            if forward_block_dict_list[j][1] not in dup:
-                if forward_block_dict_list[j][1] in reverse_block_dict:
-                    if str_compare(forward_block_dict_list[i], forward_block_dict_list[j], reverse_block_dict[forward_block_dict_list[i][1]], reverse_block_dict[forward_block_dict_list[j][1]], phredQ):
-                        dup.add(forward_block_dict_list[j][1])
+        for j in range((i + 1), len(forward_block)):
+            if forward_block[j][1] not in dup:
+                if forward_block[j][1] in reverse_block:
+                    if str_compare(forward_block[i], forward_block[j], reverse_block[forward_block[i][1]], reverse_block[forward_block[j][1]], phredQ):
+                        dup.add(forward_block[j][1])
     return keep, dup
 
 
-def dedup(in_file, phred, out_file):
-    f = pysam.AlignmentFile(in_file, "rb")
-    forward_block_dict = {}
-    reverse_block_dict = {}
-    chrom_flag = False
-    chrom_tmp = "chrM"
-    dup = set() # duplicated pair names
-    keep = [] # bitmap, whether the Nth read should be kept
+def blocks(f, keep):
+    forward_block = {} # {chrom: {startpos: [rid, name, seq, qual]}}
+    reverse_block = {} # {chrom: {name: [rid, seq, qual]}}
+    current_chrom = -1
     for rid, frag in enumerate(f):
         keep.append(False)
-        if frag.is_proper_pair:
-            if frag.template_length > 0:
-                if frag.reference_id not in forward_block_dict:
-                    forward_block_dict[frag.reference_id] = {}
-                    forward_block_dict[frag.reference_id][frag.reference_start] = [
-                        [rid, frag.query_name, frag.query_sequence, frag.query_qualities]]
-                    if not chrom_flag:
-                        chrom_tmp = frag.reference_id
-                        chrom_flag = True
-                        continue
-                    for i in forward_block_dict[chrom_tmp].keys():
-                        if len(forward_block_dict[chrom_tmp][i]) >= 2:
-                            block_keep, block_dup = block_compare(forward_block_dict[chrom_tmp][i],
-                                                      reverse_block_dict[chrom_tmp], phred)
-                            dup.update(block_dup)
-                            for i in block_keep:
-                                keep[i] = True
-                        else:
-                            keep[forward_block_dict[chrom_tmp][i][0][0]] = True
-                    forward_block_dict[chrom_tmp].clear()
-                    for i in reverse_block_dict[chrom_tmp].keys():
-                        if i not in dup:
-                            keep[reverse_block_dict[chrom_tmp][i][0]] = True
-                    reverse_block_dict[chrom_tmp].clear()
-                    chrom_tmp = frag.reference_id
-                elif frag.reference_start not in forward_block_dict[frag.reference_id]:
-                    forward_block_dict[frag.reference_id][
-                        frag.reference_start] = {}
-                    forward_block_dict[frag.reference_id][frag.reference_start] = [
-                        (rid, frag.query_name, frag.query_sequence, frag.query_qualities)]
-                else:
-                    forward_block_dict[frag.reference_id][frag.reference_start].append(
-                        (rid, frag.query_name, frag.query_sequence, frag.query_qualities))
-            elif frag.template_length < 0:
-                if frag.reference_id not in reverse_block_dict:
-                    reverse_block_dict[frag.reference_id] = {}
-                reverse_block_dict[frag.reference_id][frag.query_name] = rid, frag.query_sequence, frag.query_qualities
+
+        if not frag.is_proper_pair:
+            keep[rid] = True
+            continue
+
+        if frag.template_length > 0:
+            if frag.reference_id not in forward_block:
+                if current_chrom != -1:
+                    yield forward_block.pop(current_chrom), reverse_block.pop(current_chrom)
+                forward_block[frag.reference_id] = {}
+                current_chrom = frag.reference_id
+
+            if frag.reference_start not in forward_block[frag.reference_id]:
+                forward_block[frag.reference_id][frag.reference_start] = [
+                    (rid, frag.query_name, frag.query_sequence, frag.query_qualities)]
             else:
-                keep[rid] = True
+                forward_block[frag.reference_id][frag.reference_start].append(
+                    (rid, frag.query_name, frag.query_sequence, frag.query_qualities))
+        elif frag.template_length < 0:
+            if frag.reference_id not in reverse_block:
+                reverse_block[frag.reference_id] = {}
+            reverse_block[frag.reference_id][frag.query_name] = rid, frag.query_sequence, frag.query_qualities
         else:
             keep[rid] = True
-# 最后一次reference_id变换后的数据处理 开始
-    if chrom_tmp in forward_block_dict:  # chrom_tmp可能不存在
-        for i in forward_block_dict[chrom_tmp].keys():
-            if len(forward_block_dict[chrom_tmp][i]) >= 2:
-                block_keep, block_dup = block_compare(forward_block_dict[chrom_tmp][
-                                          i], reverse_block_dict[chrom_tmp], phred)
+
+    # yield last one
+    if current_chrom in forward_block:
+        yield forward_block[current_chrom], reverse_block[current_chrom]
+
+
+def dedup(in_file, phred, out_file, pool):
+    f = pysam.AlignmentFile(in_file, "rb")
+    dup = set() # duplicated pair names
+    keep = [] # bitmap, whether the Nth read should be kept
+
+    for forward_block, reverse_block in blocks(f, keep):
+        for i in forward_block.keys():
+            if len(forward_block[i]) >= 2:
+                block_keep, block_dup = block_compare(forward_block[i], reverse_block, phred)
                 dup.update(block_dup)
-                for i in block_keep:
-                    keep[i] = True
+                for x in block_keep:
+                    keep[x] = True
             else:
-                keep[forward_block_dict[chrom_tmp][i][0][0]] = True
-        forward_block_dict[chrom_tmp].clear()
-        for i in reverse_block_dict[chrom_tmp].keys():
+                keep[forward_block[i][0][0]] = True
+        for i in reverse_block.keys():
             if i not in dup:
-                keep[reverse_block_dict[chrom_tmp][i][0]] = True
-        reverse_block_dict[chrom_tmp].clear()
-# 最后一次reference_id变换后的数据处理 结束
+                keep[reverse_block[i][0]] = True
+
     f.close()
     f = pysam.AlignmentFile(in_file, "rb")
     f_w = pysam.AlignmentFile(out_file, "wb", template=f)
@@ -176,6 +161,7 @@ if __name__ == "__main__":
         print "see -h for help"
         sys.exit(-1)
     time1 = time.time()
-    dedup(o.input1, o.phred, o.output)
+    pool = Pool(processes=o.process) if o.process > 0 else None
+    dedup(o.input1, o.phred, o.output, pool)
     time2 = time.time()
     print 'Time used: ' + str(time2 - time1)
