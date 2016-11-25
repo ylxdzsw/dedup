@@ -92,8 +92,8 @@ def block_compare(forward_block, reverse_block, phredQ=20):
 
 
 def blocks(f, keep):
-    forward_block = {} # {chrom: {startpos: [rid, name, seq, qual]}}
-    reverse_block = {} # {chrom: {name: [rid, seq, qual]}}
+    forward_block = {} # {chrom: {startpos: [(rid, name, seq, qual)]}}
+    reverse_block = {} # {chrom: {name: (rid, seq, qual)}}
     current_chrom = -1
     for rid, frag in enumerate(f):
         keep.append(False)
@@ -127,23 +127,40 @@ def blocks(f, keep):
         yield forward_block[current_chrom], reverse_block[current_chrom]
 
 
+def dedup_block(forward_block, reverse_block, phred):
+    dup, keep = set(), []
+
+    for i in forward_block.keys():
+        if len(forward_block[i]) >= 2:
+            block_keep, block_dup = block_compare(forward_block[i], reverse_block, phred)
+            dup.update(block_dup)
+            keep += block_keep
+        else:
+            keep.append(forward_block[i][0][0])
+
+    for i in reverse_block.keys():
+        if i not in dup:
+            keep.append(reverse_block[i][0])
+
+    return keep
+
+
 def dedup(in_file, phred, out_file, pool):
     f = pysam.AlignmentFile(in_file, "rb")
-    dup = set() # duplicated pair names
     keep = [] # bitmap, whether the Nth read should be kept
+    task = [] # hold references to async tasks
 
     for forward_block, reverse_block in blocks(f, keep):
-        for i in forward_block.keys():
-            if len(forward_block[i]) >= 2:
-                block_keep, block_dup = block_compare(forward_block[i], reverse_block, phred)
-                dup.update(block_dup)
-                for x in block_keep:
-                    keep[x] = True
-            else:
-                keep[forward_block[i][0][0]] = True
-        for i in reverse_block.keys():
-            if i not in dup:
-                keep[reverse_block[i][0]] = True
+        if pool:
+            task.append(pool.apply_async(dedup_block, (forward_block, reverse_block, phred)))
+        else:
+            for i in dedup_block(forward_block, reverse_block, phred):
+                keep[i] = True
+
+    if pool:
+        for t in task:
+            for i in t.get():
+                keep[i] = True
 
     f.close()
     f = pysam.AlignmentFile(in_file, "rb")
