@@ -32,17 +32,17 @@ def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phre
     #     len(forward_list1[2]), forward_list1[2], forward_list1[3].tolist(),
     #     len(forward_list2[2]), forward_list2[2], forward_list2[3].tolist(),
     #     phredQ) and c_ext.str_compare(
-    #     len(reverse_list1[2]), reverse_list1[2], reverse_list1[3].tolist(),
-    #     len(reverse_list2[2]), reverse_list2[2], reverse_list2[3].tolist(),
+    #     len(reverse_list1[1]), reverse_list1[1], reverse_list1[2].tolist(),
+    #     len(reverse_list2[1]), reverse_list2[1], reverse_list2[2].tolist(),
     #     phredQ)
 
-    seq_1 = forward_list1[2] + reverse_list1[2]
+    seq_1 = forward_list1[2] + reverse_list1[1]
     phred_1 = forward_list1[3].tolist()
-    tmp_2 = reverse_list1[3].tolist()
+    tmp_2 = reverse_list1[2].tolist()
     phred_1.extend(tmp_2)
-    seq_2 = forward_list2[2] + reverse_list2[2]
+    seq_2 = forward_list2[2] + reverse_list2[1]
     phred_2 = forward_list2[3].tolist()
-    tmp_2 = reverse_list2[3].tolist()
+    tmp_2 = reverse_list2[2].tolist()
     phred_2.extend(tmp_2)
 
     if C_EXT: return c_ext.str_compare(
@@ -77,106 +77,97 @@ def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phre
 
 
 def block_compare(forward_block_dict_list, reverse_block_dict, phredQ=20):
-    dup_seqname_dict = {}
-    save_number_dict = {}
+    dup = set()
+    keep = [] # list of id of reads to keep
     for i in range(len(forward_block_dict_list)):
-        if forward_block_dict_list[i][1] not in dup_seqname_dict:
-            save_number_dict[forward_block_dict_list[i][0]] = True
+        if forward_block_dict_list[i][1] not in dup:
+            keep.append(forward_block_dict_list[i][0])
             if forward_block_dict_list[i][1] not in reverse_block_dict:
                 continue
         for j in range((i + 1), len(forward_block_dict_list)):
-            if forward_block_dict_list[j][1] not in dup_seqname_dict:
+            if forward_block_dict_list[j][1] not in dup:
                 if forward_block_dict_list[j][1] in reverse_block_dict:
                     if str_compare(forward_block_dict_list[i], forward_block_dict_list[j], reverse_block_dict[forward_block_dict_list[i][1]], reverse_block_dict[forward_block_dict_list[j][1]], phredQ):
-                        dup_seqname_dict[forward_block_dict_list[j][1]] = True
-    return save_number_dict, dup_seqname_dict
+                        dup.add(forward_block_dict_list[j][1])
+    return keep, dup
 
 
 def dedup(in_file, phred, out_file):
     f = pysam.AlignmentFile(in_file, "rb")
-    total = 0
     forward_block_dict = {}
     reverse_block_dict = {}
-    other_dict = set()
     chrom_flag = False
     chrom_tmp = "chrM"
-    dedup_dict = set()
-    save_dict = set()
-    for frag in f:
+    dup = set() # duplicated pair names
+    keep = [] # bitmap, whether the Nth read should be kept
+    for rid, frag in enumerate(f):
+        keep.append(False)
         if frag.is_proper_pair:
             if frag.template_length > 0:
                 if frag.reference_id not in forward_block_dict:
                     forward_block_dict[frag.reference_id] = {}
                     forward_block_dict[frag.reference_id][frag.reference_start] = [
-                        [total, frag.query_name, frag.query_sequence, frag.query_qualities]]
+                        [rid, frag.query_name, frag.query_sequence, frag.query_qualities]]
                     if not chrom_flag:
                         chrom_tmp = frag.reference_id
                         chrom_flag = True
-                        total += 1
                         continue
                     for i in forward_block_dict[chrom_tmp].keys():
                         if len(forward_block_dict[chrom_tmp][i]) >= 2:
-                            save, dup = block_compare(forward_block_dict[chrom_tmp][i],
+                            block_keep, block_dup = block_compare(forward_block_dict[chrom_tmp][i],
                                                       reverse_block_dict[chrom_tmp], phred)
-                            dedup_dict.update(dup)
-                            save_dict.update(save)
+                            dup.update(block_dup)
+                            for i in block_keep:
+                                keep[i] = True
                         else:
-                            save_dict.add(forward_block_dict[chrom_tmp][i][0][0])
+                            keep[forward_block_dict[chrom_tmp][i][0][0]] = True
                     forward_block_dict[chrom_tmp].clear()
                     for i in reverse_block_dict[chrom_tmp].keys():
-                        if i not in dedup_dict:
-                            save_dict.add(reverse_block_dict[chrom_tmp][i][0])
+                        if i not in dup:
+                            keep[reverse_block_dict[chrom_tmp][i][0]] = True
                     reverse_block_dict[chrom_tmp].clear()
                     chrom_tmp = frag.reference_id
                 elif frag.reference_start not in forward_block_dict[frag.reference_id]:
                     forward_block_dict[frag.reference_id][
                         frag.reference_start] = {}
                     forward_block_dict[frag.reference_id][frag.reference_start] = [
-                        [total, frag.query_name, frag.query_sequence, frag.query_qualities]]
+                        (rid, frag.query_name, frag.query_sequence, frag.query_qualities)]
                 else:
                     forward_block_dict[frag.reference_id][frag.reference_start].append(
-                        [total, frag.query_name, frag.query_sequence, frag.query_qualities])
+                        (rid, frag.query_name, frag.query_sequence, frag.query_qualities))
             elif frag.template_length < 0:
                 if frag.reference_id not in reverse_block_dict:
                     reverse_block_dict[frag.reference_id] = {}
-                    reverse_block_dict[frag.reference_id][frag.query_name] = [
-                        total, frag.query_name, frag.query_sequence, frag.query_qualities]
-                else:
-                    reverse_block_dict[frag.reference_id][frag.query_name] = [
-                        total, frag.query_name, frag.query_sequence, frag.query_qualities]
+                reverse_block_dict[frag.reference_id][frag.query_name] = rid, frag.query_sequence, frag.query_qualities
             else:
-                other_dict.add(total)
+                keep[rid] = True
         else:
-            other_dict.add(total)
-        total += 1
+            keep[rid] = True
 # 最后一次reference_id变换后的数据处理 开始
     if chrom_tmp in forward_block_dict:  # chrom_tmp可能不存在
         for i in forward_block_dict[chrom_tmp].keys():
             if len(forward_block_dict[chrom_tmp][i]) >= 2:
-                save, dup = block_compare(forward_block_dict[chrom_tmp][
+                block_keep, block_dup = block_compare(forward_block_dict[chrom_tmp][
                                           i], reverse_block_dict[chrom_tmp], phred)
-                dedup_dict.update(dup)
-                save_dict.update(save)
+                dup.update(block_dup)
+                for i in block_keep:
+                    keep[i] = True
             else:
-                save_dict.add(forward_block_dict[chrom_tmp][i][0][0])
+                keep[forward_block_dict[chrom_tmp][i][0][0]] = True
         forward_block_dict[chrom_tmp].clear()
         for i in reverse_block_dict[chrom_tmp].keys():
-            if i not in dedup_dict:
-                save_dict.add(reverse_block_dict[chrom_tmp][i][0])
+            if i not in dup:
+                keep[reverse_block_dict[chrom_tmp][i][0]] = True
         reverse_block_dict[chrom_tmp].clear()
 # 最后一次reference_id变换后的数据处理 结束
-    save_dict.update(other_dict)
     f.close()
     f = pysam.AlignmentFile(in_file, "rb")
     f_w = pysam.AlignmentFile(out_file, "wb", template=f)
-    print "total=", total,  "---after dedup---", len(save_dict)
-    total = 0
-    for frag in f:
-        if total in save_dict:
+    for rid, frag in enumerate(f):
+        if keep[rid]:
             f_w.write(frag)
-        total += 1
     f_w.close()
-    print "total=", total,  "---after dedup---", len(save_dict)
+    print "total=", rid,  "---after dedup---", sum(keep)
 
 
 if __name__ == "__main__":
