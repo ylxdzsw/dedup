@@ -27,6 +27,7 @@ def parse_command():
 
 
 def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phredQ=20):
+    # I believe this is the right comparing. but keep the same output with origin version first.
     # if C_EXT: return c_ext.str_compare(
     #     len(forward_list1[2]), forward_list1[2], forward_list1[3].tolist(),
     #     len(forward_list2[2]), forward_list2[2], forward_list2[3].tolist(),
@@ -47,7 +48,7 @@ def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phre
     if C_EXT: return c_ext.str_compare(
         len(seq_1), seq_1, phred_1,
         len(seq_2), seq_2, phred_2,
-        phredQ) == 1
+        phredQ)
 
     if len(seq_1) == len(seq_2):
         if seq_1 == seq_2:
@@ -78,8 +79,6 @@ def str_compare(forward_list1, forward_list2, reverse_list1, reverse_list2, phre
 def block_compare(forward_block_dict_list, reverse_block_dict, phredQ=20):
     dup_seqname_dict = {}
     save_number_dict = {}
-    line_number_list = [save_number_dict, dup_seqname_dict]
-    start = True
     for i in range(len(forward_block_dict_list)):
         if forward_block_dict_list[i][1] not in dup_seqname_dict:
             save_number_dict[forward_block_dict_list[i][0]] = True
@@ -90,7 +89,7 @@ def block_compare(forward_block_dict_list, reverse_block_dict, phredQ=20):
                 if forward_block_dict_list[j][1] in reverse_block_dict:
                     if str_compare(forward_block_dict_list[i], forward_block_dict_list[j], reverse_block_dict[forward_block_dict_list[i][1]], reverse_block_dict[forward_block_dict_list[j][1]], phredQ):
                         dup_seqname_dict[forward_block_dict_list[j][1]] = True
-    return line_number_list
+    return save_number_dict, dup_seqname_dict
 
 
 def dedup(in_file, phred, out_file):
@@ -98,12 +97,11 @@ def dedup(in_file, phred, out_file):
     total = 0
     forward_block_dict = {}
     reverse_block_dict = {}
-    other_dict = {}
+    other_dict = set()
     chrom_flag = False
     chrom_tmp = "chrM"
-    line_list = []
-    dedup_dict = {}
-    save_dict = {}
+    dedup_dict = set()
+    save_dict = set()
     for frag in f:
         if frag.is_proper_pair:
             if frag.template_length > 0:
@@ -118,18 +116,16 @@ def dedup(in_file, phred, out_file):
                         continue
                     for i in forward_block_dict[chrom_tmp].keys():
                         if len(forward_block_dict[chrom_tmp][i]) >= 2:
-                            line_list = block_compare(forward_block_dict[chrom_tmp][
-                                                      i], reverse_block_dict[chrom_tmp], phred)
-                            dedup_dict.update(line_list[1])
-                            save_dict.update(line_list[0])
+                            save, dup = block_compare(forward_block_dict[chrom_tmp][i],
+                                                      reverse_block_dict[chrom_tmp], phred)
+                            dedup_dict.update(dup)
+                            save_dict.update(save)
                         else:
-                            save_dict[forward_block_dict[
-                                chrom_tmp][i][0][0]] = True
+                            save_dict.add(forward_block_dict[chrom_tmp][i][0][0])
                     forward_block_dict[chrom_tmp].clear()
                     for i in reverse_block_dict[chrom_tmp].keys():
                         if i not in dedup_dict:
-                            save_dict[reverse_block_dict[
-                                chrom_tmp][i][0]] = True
+                            save_dict.add(reverse_block_dict[chrom_tmp][i][0])
                     reverse_block_dict[chrom_tmp].clear()
                     chrom_tmp = frag.reference_id
                 elif frag.reference_start not in forward_block_dict[frag.reference_id]:
@@ -149,38 +145,38 @@ def dedup(in_file, phred, out_file):
                     reverse_block_dict[frag.reference_id][frag.query_name] = [
                         total, frag.query_name, frag.query_sequence, frag.query_qualities]
             else:
-                other_dict[total] = True
+                other_dict.add(total)
         else:
-            other_dict[total] = True
+            other_dict.add(total)
         total += 1
 # 最后一次reference_id变换后的数据处理 开始
     if chrom_tmp in forward_block_dict:  # chrom_tmp可能不存在
         for i in forward_block_dict[chrom_tmp].keys():
             if len(forward_block_dict[chrom_tmp][i]) >= 2:
-                line_list = block_compare(forward_block_dict[chrom_tmp][
+                save, dup = block_compare(forward_block_dict[chrom_tmp][
                                           i], reverse_block_dict[chrom_tmp], phred)
-                dedup_dict.update(line_list[1])
-                save_dict.update(line_list[0])
+                dedup_dict.update(dup)
+                save_dict.update(save)
             else:
-                save_dict[forward_block_dict[chrom_tmp][i][0][0]] = True
+                save_dict.add(forward_block_dict[chrom_tmp][i][0][0])
         forward_block_dict[chrom_tmp].clear()
         for i in reverse_block_dict[chrom_tmp].keys():
             if i not in dedup_dict:
-                save_dict[reverse_block_dict[chrom_tmp][i][0]] = True
+                save_dict.add(reverse_block_dict[chrom_tmp][i][0])
         reverse_block_dict[chrom_tmp].clear()
 # 最后一次reference_id变换后的数据处理 结束
     save_dict.update(other_dict)
     f.close()
     f = pysam.AlignmentFile(in_file, "rb")
     f_w = pysam.AlignmentFile(out_file, "wb", template=f)
-    print "total=", total,  "---after dedup---", len(save_dict.keys())
+    print "total=", total,  "---after dedup---", len(save_dict)
     total = 0
     for frag in f:
         if total in save_dict:
             f_w.write(frag)
         total += 1
     f_w.close()
-    print "total=", total,  "---after dedup---", len(save_dict.keys())
+    print "total=", total,  "---after dedup---", len(save_dict)
 
 
 if __name__ == "__main__":
