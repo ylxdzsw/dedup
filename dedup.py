@@ -8,7 +8,7 @@ import pysam
 import time
 from multiprocessing import Pool
 
-# try load C extensions
+# try to load the C extension
 try:
     from c_ext import lib as c_ext
     C_EXT = True
@@ -30,7 +30,7 @@ def parse_command():
 
 
 def str_compare(forward1, forward2, reverse1, reverse2, phredQ=20):
-    # I believe this is the right comparing. but keep the same output with origin version first.
+    # I believe this is the right comparison. but keep the same output with origin version first.
     # if C_EXT: return c_ext.str_compare(
     #     len(forward1[2]), forward1[2], forward1[3].tolist(),
     #     len(forward2[2]), forward2[2], forward2[3].tolist(),
