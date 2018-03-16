@@ -16,14 +16,14 @@ except ImportError:
     C_EXT = False
 
 def parse_command():
-    usage = "usage: ./dedup.py -1 /haplox/rawout/150626/150702/liliang_cfDNA-009_sort.bam -o /haplox/users/huang/mypy/liliang_cfDNA-009_sort_test.bam > liliang_cfDNA-009_sort_test_len.dedup"
+    usage = "usage: ./dedup.py -1 in.sorted.bam -o out.bam > dedup.log"
     version = "%prog 1.0"
     parser = OptionParser(usage=usage, version=version)
     parser.add_option("-1", "--input1", dest="input1", help="the bam file")
     parser.add_option("-q", "--phredQ", dest="phred",
-                      help="Phred Q", type="int", default="20")
+                      help="Phred quality score threshold", type="int", default="20")
     parser.add_option("-o", "--output", dest="output",
-                      default="/haplox/users/fastq", help="output file")
+                      default=".", help="output file")
     parser.add_option("-p", "--process", dest="process",
                       help="number of worker processes to start", type="int", default="0")
     return parser.parse_args()
